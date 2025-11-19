@@ -1,0 +1,379 @@
+name: QualityPipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Exécution quotidienne à 2h du matin pour les tests de charge
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      run_load_tests:
+        description: 'Exécuter les tests de charge'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '18'
+
+jobs:
+  # Job 1: Analyse statique et dette technique
+  code-quality:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Pour l'analyse de l'historique
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 pylint radon bandit mypy black isort
+
+    - name: Code formatting check (Black)
+      run: |
+        black --check --diff app.py
+      continue-on-error: true
+
+    - name: Import sorting check (isort)
+      run: |
+        isort --check-only --diff app.py
+      continue-on-error: true
+
+    - name: Linting (Flake8)
+      run: |
+        flake8 app.py --count --max-line-length=100 --statistics \
+          --format=html --htmldir=reports/flake8 \
+          --exit-zero
+        flake8 app.py --count --max-line-length=100 --statistics
+
+    - name: Static Analysis (Pylint)
+      run: |
+        pylint app.py --output-format=json:reports/pylint.json,colorized \
+          --exit-zero
+        pylint app.py --fail-under=7.0
+
+    - name: Complexity Analysis (Radon - Cyclomatic)
+      run: |
+        radon cc app.py -a -s -j > reports/radon-cc.json
+        radon cc app.py -a -s --total-average
+
+    - name: Maintainability Index (Radon - MI)
+      run: |
+        radon mi app.py -s -j > reports/radon-mi.json
+        radon mi app.py -s
+
+    - name: Raw Metrics (Radon)
+      run: |
+        radon raw app.py -s -j > reports/radon-raw.json
+        radon raw app.py -s
+
+    - name: Halstead Metrics (Radon)
+      run: |
+        radon hal app.py -j > reports/radon-hal.json
+        radon hal app.py
+
+    - name: Security Analysis (Bandit)
+      run: |
+        bandit -r app.py -f json -o reports/bandit.json || true
+        bandit -r app.py
+
+    - name: Type Checking (MyPy)
+      run: |
+        mypy app.py --html-report reports/mypy --no-error-summary || true
+        mypy app.py
+      continue-on-error: true
+
+    - name: Generate Technical Debt Summary
+      run: |
+        cat > reports/debt-summary.txt << 'EOF'
+        ========================================
+        TECHNICAL DEBT SUMMARY
+        ========================================
+        
+        Date: $(date)
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref_name }}
+        
+        EOF
+        
+        echo "## Complexity Metrics" >> reports/debt-summary.txt
+        radon cc app.py -a -s >> reports/debt-summary.txt
+        
+        echo -e "\n## Maintainability Index" >> reports/debt-summary.txt
+        radon mi app.py -s >> reports/debt-summary.txt
+        
+        echo -e "\n## Raw Metrics" >> reports/debt-summary.txt
+        radon raw app.py -s >> reports/debt-summary.txt
+
+    - name: Upload Code Quality Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: code-quality-reports
+        path: reports/
+        retention-days: 30
+
+  # Job 2: Tests unitaires
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-html pytest-json-report
+
+    - name: Run Unit Tests with Coverage
+      run: |
+        pytest app.py \
+          --maxfail=1 \
+          --disable-warnings \
+          --cov=. \
+          --cov-report=html:reports/coverage \
+          --cov-report=json:reports/coverage.json \
+          --cov-report=term \
+          --html=reports/pytest-report.html \
+          --json-report \
+          --json-report-file=reports/pytest-report.json
+
+    - name: Coverage Comment
+      if: github.event_name == 'pull_request'
+      run: |
+        COVERAGE=$(python -c "import json; data=json.load(open('reports/coverage.json')); print(f\"{data['totals']['percent_covered']:.1f}\")")
+        echo "Coverage: ${COVERAGE}%"
+
+    - name: Upload Test Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-reports
+        path: reports/
+        retention-days: 30
+
+  # Job 3: Tests de charge K6
+  load-tests:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    # Exécuter uniquement sur main, sur schedule, ou si déclenché manuellement
+    if: |
+      github.ref == 'refs/heads/main' || 
+      github.event_name == 'schedule' || 
+      github.event.inputs.run_load_tests == 'true'
+    
+    services:
+      # Service pour l'API à tester
+      api:
+        image: python:3.10-slim
+        ports:
+          - 8000:8000
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install API dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Start API in background
+      run: |
+        nohup uvicorn app:app --host 0.0.0.0 --port 8000 > api.log 2>&1 &
+        sleep 5
+        
+    - name: Verify API is running
+      run: |
+        curl -f http://localhost:8000/ || (cat api.log && exit 1)
+
+    - name: Setup Node.js for K6
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Install K6
+      run: |
+        sudo gpg -k
+        sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+          --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+        echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | \
+          sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install k6
+
+    - name: Run Functional Load Tests
+      continue-on-error: true
+      run: |
+        k6 run test.js \
+          --out json=reports/k6-functional.json \
+          --summary-export=reports/k6-functional-summary.json
+
+    - name: Run Stress Tests
+      continue-on-error: true
+      run: |
+        k6 run stress_test.js \
+          --out json=reports/k6-stress.json \
+          --summary-export=reports/k6-stress-summary.json
+
+    - name: Generate Load Test Report
+      if: always()
+      run: |
+        cat > reports/load-test-summary.txt << 'EOF'
+        ========================================
+        LOAD TEST SUMMARY
+        ========================================
+        
+        Date: $(date)
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref_name }}
+        
+        EOF
+        
+        if [ -f reports/k6-functional-summary.json ]; then
+          echo "## Functional Tests Results" >> reports/load-test-summary.txt
+          cat reports/k6-functional-summary.json | jq '.metrics' >> reports/load-test-summary.txt
+        fi
+        
+        if [ -f reports/k6-stress-summary.json ]; then
+          echo -e "\n## Stress Tests Results" >> reports/load-test-summary.txt
+          cat reports/k6-stress-summary.json | jq '.metrics' >> reports/load-test-summary.txt
+        fi
+
+    - name: Upload API Logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: api-logs
+        path: api.log
+        retention-days: 7
+
+    - name: Upload Load Test Reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: load-test-reports
+        path: reports/
+        retention-days: 30
+
+  # Job 4: Build et validation finale
+  build:
+    runs-on: ubuntu-latest
+    needs: [code-quality, unit-tests]
+    if: success()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build verification
+      run: |
+        python -c "import app; print('Build successful!')"
+
+    - name: Create deployment artifact
+      if: github.ref == 'refs/heads/main'
+      run: |
+        mkdir -p dist
+        cp app.py dist/
+        cp requirements.txt dist/
+        tar -czf digicheese-api.tar.gz dist/
+
+    - name: Upload Build Artifact
+      if: github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-package
+        path: digicheese-api.tar.gz
+        retention-days: 90
+
+  # Job 5: Notification et synthèse
+  notify:
+    runs-on: ubuntu-latest
+    needs: [code-quality, unit-tests, load-tests, build]
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+
+    - name: Generate Pipeline Summary
+      run: |
+        cat > $GITHUB_STEP_SUMMARY << 'EOF'
+        # 🚀 Pipeline Quality Summary
+        
+        ## ✅ Jobs Status
+        - **Code Quality**: ${{ needs.code-quality.result }}
+        - **Unit Tests**: ${{ needs.unit-tests.result }}
+        - **Load Tests**: ${{ needs.load-tests.result }}
+        - **Build**: ${{ needs.build.result }}
+        
+        ## 📊 Artifacts Generated
+        - Code Quality Reports
+        - Test Coverage Reports
+        - Load Test Results
+        - Deployment Package
+        
+        ## 🔗 Useful Links
+        - [View Reports](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        
+        EOF
+
+    - name: Check Pipeline Success
+      run: |
+        if [[ "${{ needs.code-quality.result }}" != "success" ]] || \
+           [[ "${{ needs.unit-tests.result }}" != "success" ]] || \
+           [[ "${{ needs.build.result }}" != "success" ]]; then
+          echo "❌ Pipeline has failures"
+          exit 1
+        else
+          echo "✅ Pipeline completed successfully"
+        fi
+        
