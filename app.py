@@ -2,6 +2,8 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from pydantic import BaseModel
+from typing import Optional, List
 import os
 
 # --------------------------
@@ -13,14 +15,24 @@ DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "3306")
 DB_NAME = os.getenv("DB_NAME", "digicheese")
 
-CONNECTION_STRING = f"sqlite:///./test.db"  # pour simplification, on utilise SQLite
-engine = create_engine(CONNECTION_STRING, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Pour simplification, on utilise SQLite
+CONNECTION_STRING = "sqlite:///./test.db"
+engine = create_engine(
+    CONNECTION_STRING,
+    connect_args={"check_same_thread": False}
+)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
+
 
 # --------------------------
 # Models
 # --------------------------
 Base = declarative_base()
+
 
 class Client(Base):
     __tablename__ = "t_client"
@@ -34,14 +46,15 @@ class Client(Base):
     email = Column(String(255), default=None)
     newsletter = Column(Integer, default=0)
 
+
 # Créer les tables
 Base.metadata.create_all(bind=engine)
+
 
 # --------------------------
 # Schemas
 # --------------------------
-from pydantic import BaseModel
-from typing import Optional, List
+
 
 class ClientBase(BaseModel):
     nom: str
@@ -53,8 +66,10 @@ class ClientBase(BaseModel):
     email: Optional[str] = None
     newsletter: Optional[int] = 0
 
+
 class ClientPost(ClientBase):
     pass
+
 
 class ClientPatch(BaseModel):
     nom: Optional[str] = None
@@ -66,14 +81,19 @@ class ClientPatch(BaseModel):
     email: Optional[str] = None
     newsletter: Optional[int] = None
 
+
 class ClientInDB(ClientBase):
     codcli: int
+
     class Config:
         orm_mode = True
+
 
 # --------------------------
 # Repository
 # --------------------------
+
+
 class ClientRepository:
     def get_all_clients(self, db: Session):
         return list(db.query(Client).all())
@@ -102,9 +122,12 @@ class ClientRepository:
         db.commit()
         return client
 
+
 # --------------------------
 # Service
 # --------------------------
+
+
 class ClientService:
     def __init__(self):
         self.repo = ClientRepository()
@@ -126,12 +149,14 @@ class ClientService:
     def delete_client(self, db: Session, client_id: int):
         return self.repo.delete_client(db, client_id)
 
+
 # --------------------------
 # FastAPI app
 # --------------------------
 app = FastAPI()
 router = APIRouter(prefix="/api/v1/client", tags=["client"])
 service = ClientService()
+
 
 def get_db():
     db = SessionLocal()
@@ -140,9 +165,11 @@ def get_db():
     finally:
         db.close()
 
+
 @router.get("/", response_model=List[ClientInDB])
 def get_clients(db: Session = Depends(get_db)):
     return service.get_all_clients(db)
+
 
 @router.get("/{client_id}", response_model=ClientInDB)
 def get_client(client_id: int, db: Session = Depends(get_db)):
@@ -151,16 +178,23 @@ def get_client(client_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Client non trouvé")
     return client
 
+
 @router.post("/", response_model=ClientInDB)
 def create_client(client: ClientPost, db: Session = Depends(get_db)):
     return service.create_client(db, client)
 
+
 @router.patch("/{client_id}", response_model=ClientInDB)
-def patch_client(client_id: int, client: ClientPatch, db: Session = Depends(get_db)):
+def patch_client(
+    client_id: int,
+    client: ClientPatch,
+    db: Session = Depends(get_db)
+):
     db_client = service.get_client_by_id(db, client_id)
     if not db_client:
         raise HTTPException(status_code=404, detail="Client non trouvé")
     return service.patch_client(db, client_id, client)
+
 
 @router.delete("/{client_id}", response_model=ClientInDB)
 def delete_client(client_id: int, db: Session = Depends(get_db)):
@@ -169,24 +203,32 @@ def delete_client(client_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Client non trouvé")
     return service.delete_client(db, client_id)
 
+
 app.include_router(router)
+
 
 # --------------------------
 # Root
 # --------------------------
+
+
 @app.get("/")
 def root():
     return {"message": "FastAPI operational"}
 
+
 # --------------------------
 # Tests intégrés pour pytest
 # --------------------------
+
+
 def test_root():
     from fastapi.testclient import TestClient
     client = TestClient(app)
     response = client.get("/")
     assert response.status_code == 200
     assert response.json() == {"message": "FastAPI operational"}
+
 
 def test_create_and_get_client():
     from fastapi.testclient import TestClient
@@ -211,6 +253,7 @@ def test_create_and_get_client():
     assert fetched["nom"] == "Dupont"
     assert fetched["prenom"] == "Jean"
 
+
 def test_patch_client():
     from fastapi.testclient import TestClient
     client = TestClient(app)
@@ -226,14 +269,20 @@ def test_patch_client():
 
     # Patch du client
     patch_data = {"prenom": "Pierre"}
-    response_patch = client.patch(f"/api/v1/client/{client_id}", json=patch_data)
-    assert response_patch.status_code == 200
-    updated = response_patch.json()
+    patch_response = client.patch(
+        f"/api/v1/client/{client_id}",
+        json=patch_data
+    )
+    assert patch_response.status_code == 200
+    updated = patch_response.json()
     assert updated["prenom"] == "Pierre"
+
 
 # --------------------------
 # Run app (for direct python execution)
 # --------------------------
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
