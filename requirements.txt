@@ -5,3 +5,5 @@ pymysql
 python-dotenv
 pytest
 httpx
+flake8
+pytest
