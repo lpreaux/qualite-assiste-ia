@@ -4,16 +4,6 @@ from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from pydantic import BaseModel
 from typing import Optional, List
-import os
-
-# --------------------------
-# Configuration DB
-# --------------------------
-DB_USER = os.getenv("DB_USER", "admin")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "Admin123!")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_NAME = os.getenv("DB_NAME", "digicheese")
 
 # Pour simplification, on utilise SQLite
 CONNECTION_STRING = "sqlite:///./test.db"
